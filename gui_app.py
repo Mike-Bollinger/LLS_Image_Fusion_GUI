@@ -377,12 +377,14 @@ class LLSImageProcessorGUI:
     def create_bottom_panel(self):
         """Progress display and control buttons"""
         bottom_frame = ttk.Frame(self.root)
-        bottom_frame.pack(fill='both', expand=True, padx=5, pady=5)
+        # Use a fixed bottom panel (don't expand) so control buttons remain visible
+        bottom_frame.pack(fill='both', expand=False, padx=5, pady=5)
         
         # Progress text area
         ttk.Label(bottom_frame, text="Processing Log:").pack(anchor='w')
+        # Keep the progress text at a reasonable fixed height so buttons are always reachable
         self.progress_text = scrolledtext.ScrolledText(bottom_frame, height=10, wrap=tk.WORD)
-        self.progress_text.pack(fill='both', expand=True, pady=5)
+        self.progress_text.pack(fill='both', expand=False, pady=5)
         
         # Control buttons
         button_frame = ttk.Frame(bottom_frame)
