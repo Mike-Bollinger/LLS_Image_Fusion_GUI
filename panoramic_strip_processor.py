@@ -13,7 +13,9 @@ import traceback
 from typing import Callable, List, Optional
 
 import numpy as np
+import pandas as pd
 import rasterio
+import rasterio.io
 from rasterio.merge import merge
 
 
@@ -21,158 +23,12 @@ from rasterio.merge import merge
 # Public API
 # ---------------------------------------------------------------------------
 
-def create_panoramic_strips(
-    geotiff_dir: str,
-    output_dir: str,
-    images_per_strip: int = 100,
-    resolution_m: float = 0.005,
-    strip_prefix: str = "strip",
-    nodata_value: int = 255,
-    reverse_order: bool = False,
-    merge_method: str = "first",
-    progress_callback: Optional[Callable[[str], None]] = None,
-) -> dict:
-    """
-    Merge individual georeferenced GeoTIFFs into panoramic strip mosaics.
 
-    Parameters
-    ----------
-    geotiff_dir : str
-        Directory containing per-image GeoTIFF files (.tif / .tiff).
-        Files are sorted by filename, so the sort order must match the
-        along-track order of the dive.
-    output_dir : str
-        Directory where strip GeoTIFFs will be saved.
-    images_per_strip : int
-        Number of individual GeoTIFFs to include in each strip.
-    resolution_m : float
-        Output pixel size in metres (e.g. 0.005 = 5 mm, 0.01 = 1 cm,
-        0.002 = 2 mm).
-    strip_prefix : str
-        Filename prefix for output files (strip_001.tif, strip_002.tif, …).
-    nodata_value : int
-        Pixel value treated as background / no-data in source files.
-        Defaults to 255 (white background used by geotiff_processor).
-    reverse_order : bool
-        If True, process GeoTIFFs in reversed filename order so that
-        overlap priority is effectively flipped (useful when you want
-        later files to occlude earlier ones). Default ``False``.
-    merge_method : str
-        Merge strategy passed to ``rasterio.merge.merge``. Common
-        values are ``'first'`` (keep first non-nodata pixel) and
-        ``'last'`` (keep last non-nodata pixel). Default ``'first'``.
-    progress_callback : Optional[Callable[[str], None]]
-        Optional function called with each progress message.
-
-    Returns
-    -------
-    dict
-        ``{'total_strips': int, 'success': int, 'failed': int,
-           'total_geotiffs': int}``
-    """
-
-    def log(msg: str) -> None:
-        if progress_callback:
-            progress_callback(msg)
-        else:
-            print(msg)
-
-    # ------------------------------------------------------------------
-    # Discover GeoTIFFs
-    # ------------------------------------------------------------------
-    tif_files = sorted(
-        glob.glob(os.path.join(geotiff_dir, "*.tif"))
-        + glob.glob(os.path.join(geotiff_dir, "*.tiff"))
-    )
-
-    if not tif_files:
-        log("  No GeoTIFF files (.tif / .tiff) found in the specified directory.")
-        return {"total_strips": 0, "success": 0, "failed": 0, "total_geotiffs": 0}
-
-    log(f"  Found {len(tif_files)} GeoTIFF file(s) in {geotiff_dir}")
-    if reverse_order:
-        tif_files = list(reversed(tif_files))
-        log("  Processing GeoTIFFs in reverse filename order (reverse_order=True).")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # Partition into strips
-    # ------------------------------------------------------------------
-    strips: List[List[str]] = [
-        tif_files[i : i + images_per_strip]
-        for i in range(0, len(tif_files), images_per_strip)
-    ]
-
-    total_strips = len(strips)
-    log(f"  Partitioned into {total_strips} strip(s) of up to {images_per_strip} image(s) each.")
-    log(f"  Output resolution: {resolution_m * 100:.1f} cm/pixel  ({resolution_m} m/pixel)")
-
-    stats = {
-        "total_strips": total_strips,
-        "success": 0,
-        "failed": 0,
-        "total_geotiffs": len(tif_files),
-    }
-
-    for strip_idx, strip_files in enumerate(strips, 1):
-        strip_name = f"{strip_prefix}_{strip_idx:03d}.tif"
-        strip_path = os.path.join(output_dir, strip_name)
-
-        log(
-            f"\n  Strip {strip_idx}/{total_strips}: "
-            f"merging {len(strip_files)} GeoTIFF(s) → {strip_name}"
-        )
-
-        try:
-            _merge_strip(strip_files, strip_path, resolution_m, nodata_value, merge_method, log)
-            log(f"    Saved: {strip_path}")
-            stats["success"] += 1
-        except Exception as exc:
-            log(f"    ERROR on strip {strip_idx}: {exc}")
-            log(traceback.format_exc())
-            stats["failed"] += 1
-
-    log(
-        f"\n  Panoramic strip summary: {stats['success']} succeeded, "
-        f"{stats['failed']} failed out of {stats['total_strips']} strip(s)."
-    )
-    return stats
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _validate_crs_for_merge(
-    datasets: List[rasterio.DatasetReader],
-    log: Callable[[str], None],
-) -> None:
-    """Validate that all datasets have compatible CRS for merging.
-    
-    Raises RuntimeError if CRS issues are detected.
-    """
-    if not datasets:
-        return
-    
-    # Check that all datasets have the same CRS
-    reference_crs = datasets[0].crs
-    log(f"    Reference CRS: {reference_crs}")
-    
-    for ds in datasets[1:]:
-        if ds.crs != reference_crs:
-            raise RuntimeError(
-                f"CRS mismatch detected: {os.path.basename(ds.name)} uses {ds.crs}, "
-                f"but first file uses {reference_crs}. All GeoTIFFs must share the same CRS."
-            )
-    
-    # Warn if using geographic coordinates (lat/lon)
-    if reference_crs.is_geographic:
-        log(
-            f"    WARNING: GeoTIFFs use geographic CRS ({reference_crs}). "
-            f"Resolution parameter will be interpreted as degrees, not meters. "
-            f"Consider reprojecting to a projected CRS (e.g., UTM) for accurate metric resolution."
-        )
 
 
 def _calculate_merge_dimensions(
@@ -220,94 +76,263 @@ def _calculate_merge_dimensions(
     }
 
 
-def _merge_strip(
-    tif_paths: List[str],
-    output_path: str,
-    resolution_m: float,
-    nodata_value: int,
-    merge_method: str,
-    log: Callable[[str], None],
-) -> None:
-    """Open *tif_paths*, mosaic them with rasterio.merge, and write *output_path*.
 
-    Alignment is purely geospatial — each source file's CRS and affine
-    transform determine where its pixels land in the merged output.
-    The merge method controls overlap priority (e.g. 'first' or 'last').
+
+
+# ---------------------------------------------------------------------------
+# Strip generation directly from original images (no pre-existing GeoTIFFs)
+# ---------------------------------------------------------------------------
+
+def create_panoramic_strips_from_images(
+    image_list_csv: str,
+    image_dir: str,
+    output_dir: str,
+    images_per_strip: int = 50,
+    resolution_m: float = 0.005,
+    strip_prefix: str = "strip",
+    selected_images: Optional[List[str]] = None,
+    lever_arm_x: float = 0.1044,
+    lever_arm_y: float = 0.6246,
+    lever_arm_z: float = 0.0826,
+    pitch_offset: float = 0.010,
+    roll_offset: float = 0.010,
+    heading_offset: float = 0.000,
+    utm_zone: Optional[int] = None,
+    utm_hemisphere: Optional[str] = None,
+    crop_top_pixels: int = 0,
+    nodata_value: int = 0,
+    merge_method: str = "first",
+    # Minimum percent overlap (0-100). 100 disables overlap-based skipping.
+    min_overlap_pct: float = 100.0,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> dict:
     """
-    opened: List[rasterio.DatasetReader] = []
-    valid_datasets: List[rasterio.DatasetReader] = []
+    Build panoramic strip mosaics directly from original images without
+    writing intermediate GeoTIFFs to disk.
 
-    try:
-        for p in tif_paths:
-            try:
-                ds = rasterio.open(p)
-                opened.append(ds)
-                if ds.crs is None:
-                    log(f"    Skipping {os.path.basename(p)}: no CRS embedded.")
+    Each image is orthorectified in-memory using the same homography
+    pipeline as :func:`geotiff_processor.process_image_to_geotiff` and
+    then contributed to the mosaic via ``rasterio.merge``.
+
+    Parameters
+    ----------
+    image_list_csv : str
+        Path to the (normalized) CSV with navigation data.
+    image_dir : str
+        Directory containing the source images.
+    output_dir : str
+        Directory where strip GeoTIFFs will be saved.
+    images_per_strip : int
+        Number of images per strip mosaic.
+    resolution_m : float
+        Output pixel size in metres.
+    strip_prefix : str
+        Filename prefix for output strips.
+    selected_images : Optional[List[str]]
+        Subset of image filenames to process (``None`` = all).
+    lever_arm_x/y/z : float
+        IMU-to-camera lever-arm offsets in the vehicle body frame.
+    pitch_offset, roll_offset, heading_offset : float
+        Angular calibration offsets in degrees.
+    utm_zone : Optional[int]
+        UTM zone (``None`` = auto from image lat/lon).
+    utm_hemisphere : Optional[str]
+        ``'N'`` or ``'S'`` (``None`` = auto from image lat/lon).
+    crop_top_pixels : int
+        Rows to remove from the top of each image before orthorectification.
+        Improves along-track overlap quality.  0 = disabled.
+    min_overlap_pct : float
+        Minimum percent overlap between a new image and the previous included
+        image required to skip the new image. 100 = disabled (no overlap filter).
+    nodata_value : int
+        No-data value written into the output GeoTIFFs (default 0).
+    merge_method : str
+        Rasterio merge strategy (``'first'`` or ``'last'``).
+    progress_callback : Optional[Callable[[str], None]]
+        Optional logging callback.
+
+    Returns
+    -------
+    dict
+        ``{'total_strips': int, 'success': int, 'failed': int,
+           'total_images': int, 'skipped_images': int}``
+    """
+    # Import here to avoid circular imports at module load time
+    from geotiff_processor import process_image_to_geotiff_memfile
+
+    def log(msg: str) -> None:
+        if progress_callback:
+            progress_callback(msg)
+        else:
+            print(msg)
+
+    # ------------------------------------------------------------------
+    # Load & filter image list
+    # ------------------------------------------------------------------
+    df = pd.read_csv(image_list_csv)
+    if selected_images is not None:
+        df = df[df['file_name'].isin(selected_images)]
+    df = df.reset_index(drop=True)
+
+    if df.empty:
+        log("  No images to process.")
+        return {"total_strips": 0, "success": 0, "failed": 0,
+                "total_images": 0, "skipped_images": 0}
+
+    log(f"  Processing {len(df)} image(s) directly from {image_dir}")
+    if crop_top_pixels > 0:
+        log(f"  Cropping top {crop_top_pixels} pixel row(s) from each image.")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Partition rows into strips
+    # ------------------------------------------------------------------
+    total_images = len(df)
+    strip_rows: List[pd.DataFrame] = [
+        df.iloc[i : i + images_per_strip]
+        for i in range(0, total_images, images_per_strip)
+    ]
+    total_strips = len(strip_rows)
+    log(f"  Partitioned into {total_strips} strip(s) of up to {images_per_strip} image(s) each.")
+    log(f"  Output resolution: {resolution_m * 100:.1f} cm/pixel  ({resolution_m} m/pixel)")
+
+    stats = {
+        "total_strips": total_strips,
+        "success": 0,
+        "failed": 0,
+        "total_images": total_images,
+        "skipped_images": 0,
+    }
+
+    for strip_idx, strip_df in enumerate(strip_rows, 1):
+        strip_name = f"{strip_prefix}_{strip_idx:03d}.tif"
+        strip_path = os.path.join(output_dir, strip_name)
+
+        log(f"\n  Strip {strip_idx}/{total_strips}: "
+            f"orthorectifying {len(strip_df)} image(s) → {strip_name}")
+
+        memfiles: List[rasterio.io.MemoryFile] = []
+        open_datasets: List[rasterio.DatasetReader] = []
+
+        try:
+            for row_idx, (_, img_row) in enumerate(strip_df.iterrows(), 1):
+                fname = img_row['file_name']
+                log(f"    [{row_idx}/{len(strip_df)}] {fname}")
+
+                mf = process_image_to_geotiff_memfile(
+                    image_row=img_row,
+                    image_dir=image_dir,
+                    lever_arm_x=lever_arm_x,
+                    lever_arm_y=lever_arm_y,
+                    lever_arm_z=lever_arm_z,
+                    pitch_offset=pitch_offset,
+                    roll_offset=roll_offset,
+                    heading_offset=heading_offset,
+                    utm_zone=utm_zone,
+                    utm_hemisphere=utm_hemisphere,
+                    crop_top_pixels=crop_top_pixels,
+                    nodata_val=nodata_value,
+                    progress_callback=progress_callback,
+                )
+
+                if mf is None:
+                    log(f"    Skipped {fname} (orthorectification failed).")
+                    stats["skipped_images"] += 1
                     continue
-                valid_datasets.append(ds)
-            except Exception as exc:
-                log(f"    Could not open {os.path.basename(p)}: {exc}")
 
-        if not valid_datasets:
-            raise RuntimeError("No valid georeferenced GeoTIFFs could be opened for this strip.")
+                # Open the in-memory dataset to inspect its bounds and
+                # possibly skip it if it overlaps too much with the
+                # previously-included image for this strip.
+                ds_new = mf.open()
 
-        # Validate CRS consistency and type
-        _validate_crs_for_merge(valid_datasets, log)
+                try:
+                    skip_due_to_overlap = False
+                    # If we already have an included dataset, compute
+                    # intersection area between the new image and the
+                    # last included image. Skip if >=70% overlap of the
+                    # new image's area.
+                    if open_datasets:
+                        ds_prev = open_datasets[-1]
+                        b1 = ds_prev.bounds
+                        b2 = ds_new.bounds
 
-        log(f"    Merging {len(valid_datasets)} valid dataset(s)…")
+                        inter_w = max(0.0, min(b1.right, b2.right) - max(b1.left, b2.left))
+                        inter_h = max(0.0, min(b1.top, b2.top) - max(b1.bottom, b2.bottom))
+                        inter_area = inter_w * inter_h
 
-        # Calculate and validate output dimensions before attempting merge
-        expected_dims = _calculate_merge_dimensions(valid_datasets, resolution_m)
-        log(f"    Expected output: {expected_dims['width']:,} x {expected_dims['height']:,} pixels "
-            f"({expected_dims['width_m']:.1f} x {expected_dims['height_m']:.1f} m)")
-        
-        # Analyze individual file dimensions to detect outliers
-        bounds_info = expected_dims['individual_bounds']
-        widths = [b['width'] for b in bounds_info]
-        heights = [b['height'] for b in bounds_info]
-        
-        median_width = np.median(widths)
-        median_height = np.median(heights)
-        
-        # Flag files with dimensions > 10x median (likely bad georeferencing)
-        outliers = []
-        for b in bounds_info:
-            if b['width'] > 10 * median_width or b['height'] > 10 * median_height:
-                outliers.append(b)
-        
-        if outliers:
-            log(f"    WARNING: {len(outliers)} file(s) have unusually large dimensions (>10x median):")
-            log(f"    Median dimensions: {median_width:.1f} x {median_height:.1f} m")
-            for outlier in outliers[:5]:  # Show first 5 outliers
-                log(f"      - {outlier['file']}: {outlier['width']:.1f} x {outlier['height']:.1f} m")
-            if len(outliers) > 5:
-                log(f"      ... and {len(outliers) - 5} more")
-            log("    These files likely have incorrect georeferencing and should be excluded or fixed.")
-        
-        # Safety check: prevent absurdly large outputs
-        max_pixels = 100_000_000  # 100 megapixels per band
-        total_pixels = expected_dims['width'] * expected_dims['height']
-        if total_pixels > max_pixels:
-            raise RuntimeError(
-                f"Output would be {total_pixels:,} pixels ({total_pixels / 1e6:.1f} MP), "
-                f"exceeding safety limit of {max_pixels:,} pixels ({max_pixels / 1e6:.1f} MP). "
-                f"This may indicate incorrect georeferencing. Check that all GeoTIFFs use a "
-                f"projected CRS (e.g., UTM) and have correct affine transforms."
+                        area_new = (b2.right - b2.left) * (b2.top - b2.bottom)
+                        overlap_ratio = inter_area / area_new if area_new > 0 else 0.0
+
+                        # If user requested overlap filtering (min_overlap_pct < 100),
+                        # compare against the user-specified threshold. Otherwise skip
+                        # overlap-based filtering.
+                        try:
+                            threshold = float(min_overlap_pct) / 100.0
+                        except Exception:
+                            threshold = 1.0
+
+                        if threshold < 1.0 and overlap_ratio >= threshold:
+                            pct = overlap_ratio * 100.0
+                            log(f"    Skipped {fname} — {pct:.1f}% overlap with previous image.")
+                            stats["skipped_images"] += 1
+                            skip_due_to_overlap = True
+
+                    if skip_due_to_overlap:
+                        # Close the opened dataset and memoryfile since we're not using it.
+                        try:
+                            ds_new.close()
+                        except Exception:
+                            pass
+                        try:
+                            mf.close()
+                        except Exception:
+                            pass
+                        continue
+
+                    # Otherwise keep the memoryfile/dataset for merging.
+                    memfiles.append(mf)
+                    open_datasets.append(ds_new)
+                except Exception:
+                    # Ensure we close resources on any unexpected error here.
+                    try:
+                        ds_new.close()
+                    except Exception:
+                        pass
+                    try:
+                        mf.close()
+                    except Exception:
+                        pass
+                    raise
+
+            if not open_datasets:
+                raise RuntimeError("No images were successfully orthorectified for this strip.")
+
+            log(f"    Merging {len(open_datasets)} orthorectified dataset(s)…")
+
+            # Safety check: prevent absurdly large outputs
+            expected = _calculate_merge_dimensions(open_datasets, resolution_m)
+            total_px = expected['width'] * expected['height']
+            max_px = 350_000_000
+            if total_px > max_px:
+                raise RuntimeError(
+                    f"Merged output would be {total_px:,} pixels "
+                    f"({total_px / 1e6:.1f} MP), exceeding safety limit of "
+                    f"{max_px / 1e6:.1f} MP. Check georeferencing."
+                )
+
+            log(f"    Expected output: {expected['width']:,} x {expected['height']:,} pixels "
+                f"({expected['width_m']:.1f} x {expected['height_m']:.1f} m)")
+
+            mosaic, out_transform = merge(
+                open_datasets,
+                method=merge_method,
+                nodata=nodata_value,
+                res=(resolution_m, resolution_m),
             )
 
-        # rasterio.merge handles all reprojection / resampling internally.
-        # res=(resolution_m, resolution_m) controls the output pixel size.
-        mosaic, out_transform = merge(
-            valid_datasets,
-            method=merge_method,
-            nodata=nodata_value,
-            res=(resolution_m, resolution_m),
-        )
-
-        out_meta = valid_datasets[0].meta.copy()
-        out_meta.update(
-            {
+            out_meta = open_datasets[0].meta.copy()
+            out_meta.update({
                 "driver": "GTiff",
                 "height": mosaic.shape[1],
                 "width": mosaic.shape[2],
@@ -318,21 +343,41 @@ def _merge_strip(
                 "blockysize": 512,
                 "nodata": nodata_value,
                 "photometric": "RGB",
-            }
-        )
+            })
 
-        with rasterio.open(output_path, "w", **out_meta) as dst:
-            dst.write(mosaic)
-            dst.update_tags(
-                SOFTWARE="Python/Rasterio",
-                STRIP_IMAGE_COUNT=str(len(valid_datasets)),
-                RESOLUTION_M=str(resolution_m),
-                MERGE_METHOD=merge_method,
-            )
+            with rasterio.open(strip_path, "w", **out_meta) as dst:
+                dst.write(mosaic)
+                dst.update_tags(
+                    SOFTWARE="Python/Rasterio/OpenCV",
+                    STRIP_IMAGE_COUNT=str(len(open_datasets)),
+                    RESOLUTION_M=str(resolution_m),
+                    MERGE_METHOD=merge_method,
+                    CROP_TOP_PIXELS=str(crop_top_pixels),
+                )
 
-    finally:
-        for ds in opened:
-            try:
-                ds.close()
-            except Exception:
-                pass
+            log(f"    Saved: {strip_path}")
+            stats["success"] += 1
+
+        except Exception as exc:
+            log(f"    ERROR on strip {strip_idx}: {exc}")
+            log(traceback.format_exc())
+            stats["failed"] += 1
+
+        finally:
+            for ds in open_datasets:
+                try:
+                    ds.close()
+                except Exception:
+                    pass
+            for mf in memfiles:
+                try:
+                    mf.close()
+                except Exception:
+                    pass
+
+    log(
+        f"\n  Panoramic strip summary (from images): "
+        f"{stats['success']} succeeded, {stats['failed']} failed, "
+        f"{stats['skipped_images']} image(s) skipped out of {stats['total_images']} total."
+    )
+    return stats

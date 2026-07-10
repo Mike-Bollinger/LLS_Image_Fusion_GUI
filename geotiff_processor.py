@@ -338,9 +338,9 @@ def process_image_to_geotiff(
     progress_callback: Optional[Callable[[str], None]] = None
 ) -> bool:
     """
-    Process a single image to generate a georeferenced GeoTIFF using 
+    Process a single image to generate a georeferenced GeoTIFF using
     OpenCV Homography for true perspective orthorectification.
-    
+
     UTM zone and hemisphere are automatically calculated from image lat/lon if not provided.
     """
     def log(msg: str):
@@ -492,3 +492,148 @@ def process_image_to_geotiff(
         import traceback
         traceback.print_exc()
         return False
+
+
+def process_image_to_geotiff_memfile(
+    image_row: pd.Series,
+    image_dir: str,
+    lever_arm_x: float = 0.1044,
+    lever_arm_y: float = 0.6246,
+    lever_arm_z: float = 0.0826,
+    pitch_offset: float = 0.010,
+    roll_offset: float = 0.010,
+    heading_offset: float = 0.000,
+    utm_zone: Optional[int] = None,
+    utm_hemisphere: Optional[str] = None,
+    crop_top_pixels: int = 0,
+    nodata_val: int = 0,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> Optional["rasterio.io.MemoryFile"]:
+    """
+    Same orthorectification pipeline as :func:`process_image_to_geotiff` but
+    writes the result into a ``rasterio.MemoryFile`` (no disk I/O) and returns
+    it.  Returns ``None`` on failure.
+
+    The caller is responsible for closing the returned MemoryFile when done.
+    """
+    def log(msg: str):
+        if progress_callback:
+            progress_callback(msg)
+        else:
+            print(msg)
+
+    try:
+        image_filename = image_row['file_name']
+        image_filepath = os.path.join(image_dir, image_filename)
+
+        if not os.path.exists(image_filepath):
+            log(f"    Warning: Image not found: {image_filepath}")
+            return None
+
+        distance_off_bottom = image_row['AUV_Altitude']
+        pitch  = -image_row['AUV_Pitch']
+        roll   =  image_row['AUV_Roll']
+        heading = image_row['AUV_Heading']
+
+        if utm_zone is None or utm_hemisphere is None:
+            latitude  = image_row['AUV_Latitude']
+            longitude = image_row['AUV_Longitude']
+            calc_zone, calc_hemi = lat_lon_to_utm_zone(latitude, longitude)
+            utm_zone       = utm_zone       if utm_zone       is not None else calc_zone
+            utm_hemisphere = utm_hemisphere if utm_hemisphere is not None else calc_hemi
+
+        camera_pos, shift = imu_to_camera_enu(
+            image_row['AUV_Easting'], image_row['AUV_Northing'], image_row['AUV_Depth'],
+            lever_arm_x, lever_arm_y, lever_arm_z,
+            pitch, roll, heading
+        )
+
+        x_coords, y_coords = pixels_to_world_coordinates(
+            distance_off_bottom=distance_off_bottom + shift[2],
+            pitch=pitch   + pitch_offset,
+            roll=roll     + roll_offset,
+            heading=heading + heading_offset,
+            image_path=image_filepath,
+            camera_east=camera_pos[0],
+            camera_north=camera_pos[1]
+        )
+
+        image = cv2.imread(image_filepath)
+        if image is None:
+            log(f"    Warning: Could not load image")
+            return None
+
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        h, w = image_rgb.shape[:2]
+
+        # Crop top pixels
+        if crop_top_pixels > 0 and h > crop_top_pixels:
+            image_rgb = image_rgb[crop_top_pixels:, :, :]
+            x_coords  = x_coords[crop_top_pixels:, :]
+            y_coords  = y_coords[crop_top_pixels:, :]
+            h = image_rgb.shape[0]
+
+        src_pts = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+        world_corners = np.float32([
+            [x_coords[0,  0],  y_coords[0,  0]],
+            [x_coords[0, -1],  y_coords[0, -1]],
+            [x_coords[-1, -1], y_coords[-1, -1]],
+            [x_coords[-1,  0], y_coords[-1,  0]]
+        ])
+
+        x_min, x_max = float(np.nanmin(x_coords)), float(np.nanmax(x_coords))
+        y_min, y_max = float(np.nanmin(y_coords)), float(np.nanmax(y_coords))
+
+        resolution = (x_max - x_min) / w
+        out_w = int(w)
+        out_h = int((y_max - y_min) / resolution)
+
+        dst_pts = np.float32([
+            [(pt[0] - x_min) / resolution, (y_max - pt[1]) / resolution]
+            for pt in world_corners
+        ])
+
+        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
+        alpha = np.ones((h, w), dtype=np.uint8) * 255
+        image_rgba = np.dstack((image_rgb, alpha))
+
+        warped_rgba = cv2.warpPerspective(
+            image_rgba, M, (out_w, out_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0, 0)
+        )
+
+        transform = Affine.translation(x_min, y_max) * Affine.scale(resolution, -resolution)
+        epsg_code = 32600 + utm_zone if utm_hemisphere.upper() == 'N' else 32700 + utm_zone
+        crs = CRS.from_epsg(epsg_code)
+
+        warped_rgb = warped_rgba[:, :, :3]
+        invalid_mask = warped_rgba[:, :, 3] == 0
+        warped_rgb[invalid_mask] = nodata_val
+
+        meta = {
+            'driver': 'GTiff',
+            'dtype': 'uint8',
+            'width': out_w,
+            'height': out_h,
+            'count': 3,
+            'crs': crs,
+            'transform': transform,
+            'compress': 'lzw',
+            'nodata': nodata_val,
+        }
+
+        memfile = rasterio.io.MemoryFile()
+        with memfile.open(**meta) as dst:
+            for band in range(3):
+                dst.write(warped_rgb[:, :, band], band + 1)
+
+        return memfile
+
+    except Exception as e:
+        log(f"    Error processing image to memory: {e}")
+        import traceback
+        traceback.print_exc()
+        return None

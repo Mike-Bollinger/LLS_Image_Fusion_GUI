@@ -10,7 +10,7 @@ from typing import Optional
 from pointcloud_processor import process_images_to_pointclouds
 from geotiff_processor import process_images_to_geotiffs
 from laz_colorizer import colorize_laz_from_images
-from panoramic_strip_processor import create_panoramic_strips
+from panoramic_strip_processor import create_panoramic_strips_from_images
 from utils import haversine_distance
 
 
@@ -21,14 +21,14 @@ class LLSImageProcessorGUI:
         self.root.geometry("900x800")
         
         # Configuration variables (default paths)
-        self.image_list_csv = tk.StringVar(value=r"")
+        self.image_list_csv = tk.StringVar(value=r"E:\\OR2601\\Image_LLS_PRC\\DIVE008_SN402\\processing\\image\\image_file_list.csv")
         self.lls_list_csv = tk.StringVar(value=r"")
         self.lls_dir = tk.StringVar(value=r"")
-        self.image_dir = tk.StringVar(value=r"")
-        self.output_dir = tk.StringVar(value=r"")
+        self.image_dir = tk.StringVar(value=r"E:\\OR2601\\Image_LLS_RAW\\DIVE008_SN402\\image_raw")
+        self.output_dir = tk.StringVar(value=r"E:\\OR2601\\Image_LLS_PRC\\DIVE008_SN402\\products")
         
         # Processing options
-        self.create_geotiff = tk.BooleanVar(value=True)
+        self.create_geotiff = tk.BooleanVar(value=False)
         self.create_pointcloud = tk.BooleanVar(value=False)
         self.copy_original_images = tk.BooleanVar(value=False)
         
@@ -39,6 +39,9 @@ class LLSImageProcessorGUI:
         self.center_lon = tk.DoubleVar(value=0.0)
         self.radius_m = tk.DoubleVar(value=100.0)
         self.skip_interval = tk.IntVar(value=1)
+        # Minimum percent overlap filter for including an image (100 = disable filter)
+        # Moved to Panoramic Strips tab; default set to 70
+        self.min_overlap_pct = tk.DoubleVar(value=70.0)
         
         # Camera parameters
         # stokey
@@ -69,12 +72,11 @@ class LLSImageProcessorGUI:
         self.dpi = tk.IntVar(value=500)
 
         # Panoramic strip parameters
-        self.create_panoramic_strips = tk.BooleanVar(value=False)
-        self.strip_input_mode = tk.StringVar(value='from_run')
-        self.strip_geotiff_dir = tk.StringVar()
+        self.create_panoramic_strips = tk.BooleanVar(value=True)
         self.images_per_strip = tk.IntVar(value=50)
         self.strip_resolution_m = tk.DoubleVar(value=0.005)
         self.strip_prefix = tk.StringVar(value='strip')
+        self.strip_crop_top_pixels = tk.IntVar(value=0)
 
         # Processing state
         self.is_processing = False
@@ -244,6 +246,8 @@ class LLSImageProcessorGUI:
         ttk.Label(skip_frame, text="Process every Nth image:").grid(row=0, column=0, sticky='w', pady=5)
         ttk.Spinbox(skip_frame, from_=1, to=100, textvariable=self.skip_interval, width=10).grid(row=0, column=1, sticky='w', padx=5, pady=5)
         ttk.Label(skip_frame, text="(1 = all images, 2 = every other, 3 = every third, etc.)", font=('Arial', 8, 'italic')).grid(row=0, column=2, sticky='w', padx=5)
+        
+        # Minimum overlap percentage (optional filter) moved to Panoramic Strips tab
     
     def create_camera_tab(self, parent):
         """Camera calibration parameters"""
@@ -273,42 +277,14 @@ class LLSImageProcessorGUI:
 
     def create_strip_tab(self, parent):
         """Panoramic strip mosaic settings."""
-
-        # --- Input source -----------------------------------------------
-        src_frame = ttk.LabelFrame(parent, text="GeoTIFF Input Source", padding=10)
+        src_frame = ttk.LabelFrame(parent, text="Image Source", padding=10)
         src_frame.pack(fill='x', padx=10, pady=10)
-
-        ttk.Radiobutton(
-            src_frame,
-            text="Use GeoTIFFs generated in the current processing run",
-            variable=self.strip_input_mode,
-            value='from_run',
-            command=self._update_strip_dir_state,
-        ).grid(row=0, column=0, columnspan=3, sticky='w', pady=3)
-
-        ttk.Radiobutton(
-            src_frame,
-            text="Use an existing GeoTIFF directory:",
-            variable=self.strip_input_mode,
-            value='from_dir',
-            command=self._update_strip_dir_state,
-        ).grid(row=1, column=0, sticky='w', pady=3)
-
-        self._strip_dir_entry = ttk.Entry(src_frame, textvariable=self.strip_geotiff_dir, width=55)
-        self._strip_dir_entry.grid(row=1, column=1, padx=5, pady=3)
-
-        self._strip_dir_button = ttk.Button(
-            src_frame,
-            text="Browse",
-            command=lambda: self.browse_directory(self.strip_geotiff_dir),
-        )
-        self._strip_dir_button.grid(row=1, column=2, pady=3)
 
         ttk.Label(
             src_frame,
-            text="(Files are merged in filename sort order — ensure filenames are zero-padded / sequential)",
-            font=('Arial', 8, 'italic'),
-        ).grid(row=2, column=0, columnspan=3, sticky='w', padx=5, pady=2)
+            text="Process original images directly (uses current camera parameters — no pre-existing GeoTIFFs required)",
+            font=('Arial', 10)
+        ).pack(anchor='w')
 
         # --- Strip parameters -------------------------------------------
         param_frame = ttk.LabelFrame(parent, text="Strip Parameters", padding=10)
@@ -321,7 +297,7 @@ class LLSImageProcessorGUI:
         ).grid(row=0, column=1, sticky='w', padx=5, pady=5)
         ttk.Label(
             param_frame,
-            text="Number of individual GeoTIFFs merged into each panoramic strip",
+            text="Number of images merged into each panoramic strip",
             font=('Arial', 8, 'italic'),
         ).grid(row=0, column=2, sticky='w', padx=5)
 
@@ -345,6 +321,24 @@ class LLSImageProcessorGUI:
             font=('Arial', 8, 'italic'),
         ).grid(row=2, column=2, sticky='w', padx=5)
 
+        ttk.Label(param_frame, text="Crop top pixels:").grid(row=3, column=0, sticky='w', pady=5)
+        ttk.Spinbox(
+            param_frame, from_=0, to=2000, increment=10,
+            textvariable=self.strip_crop_top_pixels, width=10,
+        ).grid(row=3, column=1, sticky='w', padx=5, pady=5)
+        ttk.Label(
+            param_frame,
+            text="Rows removed from top of each image before georeferencing (improves overlap).  0 = disabled.",
+            font=('Arial', 8, 'italic'),
+            wraplength=450,
+            justify='left',
+        ).grid(row=3, column=2, sticky='w', padx=5)
+
+        # Minimum overlap percentage (optional filter) for strip generation
+        ttk.Label(param_frame, text="Min % overlap to include image:").grid(row=4, column=0, sticky='w', pady=5)
+        ttk.Spinbox(param_frame, from_=0, to=100, increment=1, textvariable=self.min_overlap_pct, width=10).grid(row=4, column=1, sticky='w', padx=5, pady=5)
+        ttk.Label(param_frame, text="(100 = no overlap filter applied)", font=('Arial', 8, 'italic')).grid(row=4, column=2, sticky='w', padx=5)
+
         # --- Output note ------------------------------------------------
         note_frame = ttk.LabelFrame(parent, text="Output", padding=10)
         note_frame.pack(fill='x', padx=10, pady=10)
@@ -357,7 +351,7 @@ class LLSImageProcessorGUI:
             note_frame,
             text=(
                 "Alignment is coordinate-based (no feature matching). "
-                "Each input GeoTIFF's embedded CRS and affine transform determine "
+                "Each image's embedded CRS and affine transform determine "
                 "its exact position in the merged strip."
             ),
             font=('Arial', 8, 'italic'),
@@ -365,14 +359,9 @@ class LLSImageProcessorGUI:
             justify='left',
         ).pack(anchor='w', pady=4)
 
-        # Set initial widget states
-        self._update_strip_dir_state()
+        # Initial state set (only processing from original images supported)
 
-    def _update_strip_dir_state(self):
-        """Enable / disable the directory entry based on the selected input mode."""
-        state = 'normal' if self.strip_input_mode.get() == 'from_dir' else 'disabled'
-        self._strip_dir_entry.config(state=state)
-        self._strip_dir_button.config(state=state)
+    
 
     def create_bottom_panel(self):
         """Progress display and control buttons"""
@@ -559,10 +548,6 @@ class LLSImageProcessorGUI:
                 raise ValueError("LLS directory is required for LAZ colorization and was not found")
 
         if self.create_panoramic_strips.get():
-            if self.strip_input_mode.get() == 'from_dir':
-                sdir = self.strip_geotiff_dir.get().strip()
-                if not sdir or not os.path.exists(sdir):
-                    raise ValueError("A valid GeoTIFF directory is required when using 'existing directory' strip mode")
             try:
                 res = self.strip_resolution_m.get()
                 if res <= 0:
@@ -575,6 +560,14 @@ class LLSImageProcessorGUI:
                     raise ValueError("Images per strip must be at least 2")
             except tk.TclError:
                 raise ValueError("Images per strip must be a positive integer")
+
+        # Validate minimum overlap percentage (0-100). 100 disables overlap filtering.
+        try:
+            mo = self.min_overlap_pct.get()
+            if mo < 0 or mo > 100:
+                raise ValueError("Min % overlap must be between 0 and 100")
+        except tk.TclError:
+            raise ValueError("Min % overlap must be a number between 0 and 100")
 
         if not self.create_geotiff.get() and not self.create_pointcloud.get() and not self.colorize_laz.get() and not self.create_panoramic_strips.get():
             raise ValueError("At least one output type must be selected")
@@ -782,44 +775,35 @@ class LLSImageProcessorGUI:
                 else:
                     self.log_message("No image selection applied - skipping copy (use with specific/radius-based selection)")
 
-            # Create Panoramic Strips
+            # Create Panoramic Strips (only supported via original images)
             if self.create_panoramic_strips.get():
                 self.log_message("\n" + "="*60)
-                self.log_message("Starting Panoramic Strip Generation")
+                self.log_message("Starting Panoramic Strip Generation (from original images)")
                 self.log_message("="*60)
 
-                # Determine source GeoTIFF directory
-                if self.strip_input_mode.get() == 'from_run':
-                    src_geotiff_dir = os.path.join(output_base, 'GeoTIFFs')
-                    if not os.path.isdir(src_geotiff_dir):
-                        self.log_message(
-                            f"  WARNING: GeoTIFF output directory not found at {src_geotiff_dir}. "
-                            "Enable 'Create GeoTIFF' in the same run, or switch to "
-                            "'Use existing GeoTIFF directory' mode."
-                        )
-                    else:
-                        strip_output_dir = os.path.join(output_base, 'panoramic_strips')
-                        strip_stats = create_panoramic_strips(
-                            geotiff_dir=src_geotiff_dir,
-                            output_dir=strip_output_dir,
-                            images_per_strip=self.images_per_strip.get(),
-                            resolution_m=self.strip_resolution_m.get(),
-                            strip_prefix=self.strip_prefix.get(),
-                            progress_callback=self.log_message,
-                        )
-                        self.log_message(f"\nPanoramic Strip Summary: {strip_stats}")
-                else:
-                    src_geotiff_dir = self.strip_geotiff_dir.get().strip()
-                    strip_output_dir = os.path.join(output_base, 'panoramic_strips')
-                    strip_stats = create_panoramic_strips(
-                        geotiff_dir=src_geotiff_dir,
-                        output_dir=strip_output_dir,
-                        images_per_strip=self.images_per_strip.get(),
-                        resolution_m=self.strip_resolution_m.get(),
-                        strip_prefix=self.strip_prefix.get(),
-                        progress_callback=self.log_message,
-                    )
-                    self.log_message(f"\nPanoramic Strip Summary: {strip_stats}")
+                strip_output_dir = os.path.join(output_base, 'panoramic_strips')
+
+                strip_stats = create_panoramic_strips_from_images(
+                    image_list_csv=normalized_csv_path,
+                    image_dir=self.image_dir.get(),
+                    output_dir=strip_output_dir,
+                    images_per_strip=self.images_per_strip.get(),
+                    resolution_m=self.strip_resolution_m.get(),
+                    strip_prefix=self.strip_prefix.get(),
+                    selected_images=selected_images,
+                    lever_arm_x=self.lever_arm_x.get(),
+                    lever_arm_y=self.lever_arm_y.get(),
+                    lever_arm_z=self.lever_arm_z.get(),
+                    pitch_offset=self.pitch_offset.get(),
+                    roll_offset=self.roll_offset.get(),
+                    heading_offset=self.heading_offset.get(),
+                    utm_zone=None,
+                    utm_hemisphere=None,
+                    crop_top_pixels=self.strip_crop_top_pixels.get(),
+                    min_overlap_pct=self.min_overlap_pct.get(),
+                    progress_callback=self.log_message,
+                )
+                self.log_message(f"\nPanoramic Strip Summary: {strip_stats}")
 
             self.log_message("\n" + "="*60)
             self.log_message("ALL PROCESSING COMPLETE!")

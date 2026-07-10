@@ -31,8 +31,8 @@ from typing import Tuple
 # ============================================================================
 
 # Hard-coded paths (modify these for your data)
-IMAGE_LIST_CSV = r"I:\Image_LLS_PRC\DIVE012_SN402\processing\image\image_file_list.csv"
-OUTPUT_DIR = r"I:\Image_LLS_PRC\DIVE012_SN402\processing\image\colmap_workspace"
+IMAGE_LIST_CSV = r"E:\EN2501_LLS\DIVE032_Stokey\processing\image\image_file_list.csv"
+OUTPUT_DIR = r"E:\EN2501_LLS\DIVE032_Stokey\processing\image\colmap_workspace"
 
 # Camera intrinsic parameters (from your existing calibration)
 FOCAL_LENGTH_PX = 3801.37053  # Focal length in pixels
