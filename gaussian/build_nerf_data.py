@@ -472,9 +472,9 @@ def run_pipeline(
 
 if __name__ == "__main__":
     # SET YOUR PATHS HERE
-    LAZ_FILE = r"E:\EN2501_LLS\DIVE032_Stokey\products\LLS\LLS_2025-08-31T102452.007600_2_V2.laz"
-    IMAGE_CSV = r"E:\EN2501_LLS\DIVE032_Stokey\processing\image\image_file_list.csv"
-    IMAGE_DIR = r"E:\EN2501_LLS\DIVE032_Stokey\processing\image\images"
-    OUTPUT_WORKSPACE = r"E:\EN2501_LLS\DIVE032_Stokey\processing\image\nerf_workspace"
+    LAZ_FILE = r"E:\OR2401\DIVE014\products\LLS\LLS_2024-03-15T051615.010100_0_V2.laz"
+    IMAGE_CSV = r"E:\OR2401\DIVE014\\processing\image\image_file_list.csv"
+    IMAGE_DIR = r"E:\OR2401_DIVE014\OR2401_DIVE014_IMAGES"
+    OUTPUT_WORKSPACE = r"E:\OR2401\DIVE014\products\nerf_workspace"
     
     run_pipeline(LAZ_FILE, IMAGE_CSV, IMAGE_DIR, OUTPUT_WORKSPACE)

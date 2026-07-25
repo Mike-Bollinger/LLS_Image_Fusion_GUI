@@ -17,6 +17,7 @@ import pandas as pd
 import rasterio
 import rasterio.io
 from rasterio.merge import merge
+import gc
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +365,7 @@ def create_panoramic_strips_from_images(
             stats["failed"] += 1
 
         finally:
+            # Close any open rasterio datasets and memoryfiles
             for ds in open_datasets:
                 try:
                     ds.close()
@@ -374,6 +376,38 @@ def create_panoramic_strips_from_images(
                     mf.close()
                 except Exception:
                     pass
+
+            # Remove large objects and clear lists to free memory.
+            # Some variables (mosaic, out_transform, out_meta) only exist
+            # when the merge succeeds — guard their deletion.
+            try:
+                del mosaic
+            except Exception:
+                pass
+            try:
+                del out_transform
+            except Exception:
+                pass
+            try:
+                del out_meta
+            except Exception:
+                pass
+
+            # Clear the lists holding references
+            try:
+                open_datasets.clear()
+            except Exception:
+                pass
+            try:
+                memfiles.clear()
+            except Exception:
+                pass
+
+            # Force garbage collection to reclaim memory promptly
+            try:
+                gc.collect()
+            except Exception:
+                pass
 
     log(
         f"\n  Panoramic strip summary (from images): "
