@@ -40,8 +40,8 @@ from scipy import optimize
 # │  Z_OFFSET = -0.213513 m           │
 # └───────────────────────────────────┘
 
-IMAGE_LIST_CSV = r"E:\VOYIS_System_Checks\Tank Test\Test01_PRC\processing\image\image_file_list.csv"
-IMAGE_DIR = r"E:\VOYIS_System_Checks\Tank Test\Test01_RAW\image_raw\2026-05-29_00-45-44"
+IMAGE_LIST_CSV = r"D:\VOYIS_System_Checks\Tank Test\Test01_PRC\processing\image\image_file_list_roll.csv"
+IMAGE_DIR = r"D:\VOYIS_System_Checks\Tank Test\Test01_RAW\image_raw\2026-05-29_00-45-44"
 
 # Frame skipping / sorting
 FRAME_INTERVAL = 1          # Present every N-th image. Increase if too many images.
